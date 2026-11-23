@@ -34,6 +34,69 @@ To build a reduced polynomial NARX model, we normally need the following steps:
 
 * See :ref:`sphx_glr_auto_examples_plot_narx.py` for an example of the basic usage of the NARX model.
 
+Input signal names and archived models
+======================================
+
+The input signals of a NARX model are identified by their position in `X`, i.e.,
+the feature ids in `feat_ids` and `delay_ids` refer to column indices.
+This is fragile when a model is archived and later applied to data whose columns
+are ordered differently, e.g., a data-collection table that was reorganized
+between measurement campaigns.
+Applying the model positionally would silently use the wrong signal for a term
+and return a plausible, but wrong, prediction.
+
+To avoid this, :class:`NARX` matches the columns of `X` to the input signals
+by name when the names are known.
+The names are taken from the column names of `X` when `X` is a dataframe whose
+columns are all strings, or from the `feature_names` parameter.
+They are stored in `feature_names_` and reused by later calls to
+:meth:`NARX.fit` and :meth:`NARX.predict`, including after the model has been
+saved and loaded (e.g., with pickle or joblib).
+
+.. code-block:: python
+
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from fastcan.narx import NARX
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.random((100, 2))
+    >>> y = X[:, 0] - 2 * X[:, 1]
+    >>> # The names are recorded when the model is fitted on a dataframe.
+    >>> narx = NARX(feat_ids=[[-1, 0], [-1, 1]], delay_ids=[[-1, 0], [-1, 0]])
+    >>> narx.fit(pd.DataFrame(X, columns=["position", "velocity"]), y)
+    NARX(delay_ids=[[-1, 0], [-1, 0]], feat_ids=[[-1, 0], [-1, 1]])
+    >>> narx.feature_names_
+    array(['position', 'velocity'], dtype=object)
+    >>> # A later table has the columns in a different order: the model still
+    >>> # uses the same signals, so the prediction is unchanged.
+    >>> y_hat = narx.predict(pd.DataFrame(X, columns=["position", "velocity"]))
+    >>> np.allclose(
+    ...     narx.predict(pd.DataFrame(X[:, ::-1], columns=["velocity", "position"])),
+    ...     y_hat,
+    ... )
+    True
+
+The matching rules are:
+
+* Columns are matched by name, so the column order of `X` does not matter.
+* Columns of `X` that do not belong to the model are ignored.
+* A missing input column raises a :class:`ValueError` that lists the missing
+  input signals, instead of returning a prediction.
+* Duplicate column names in `X` raise a :class:`ValueError`, because the signal
+  that a column refers to is ambiguous.
+* A dataframe whose column labels are not all strings cannot be matched by
+  name. When the model has recorded input signal names, passing such a
+  dataframe raises a :class:`ValueError` instead of silently falling back to
+  positional matching. Pass the values as an array to match by position.
+* A model fitted without input signal names raises a :class:`ValueError` when
+  :meth:`NARX.predict` is called with a named dataframe, rather than falling
+  back to positional matching. Pass an array to use positional matching, or
+  refit the model with named data or with `feature_names`.
+
+Use :func:`print_narx` to check which signals and delays a loaded model uses.
+When the model has recorded names, the terms are printed with the signal names,
+e.g., ``u2[k-3]``, instead of the column indices, e.g., ``X[k-3,2]``.
+
 Multiple time series and missing values
 =======================================
 

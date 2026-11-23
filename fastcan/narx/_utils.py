@@ -32,6 +32,7 @@ from ._feature import (
     make_time_shift_ids,
     tp2fd,
 )
+from ._names import _get_column_names, _get_recorded_names
 
 
 @validate_params(
@@ -52,6 +53,11 @@ def print_narx(
     """Print a NARX model as a Table which contains y idx, Term, and Coef.
     y idx is used to indicate which output (assuming it is a multi-output case)
     the term belongs to.
+
+    When the model has recorded input signal names, i.e., ``feature_names_`` is
+    defined, the terms are printed with the signal names and delays, e.g.,
+    ``u2[k-3]``, instead of the column indices, e.g., ``X[k-3,2]``. This makes
+    it easy to check which input signals an archived model uses.
 
     Parameters
     ----------
@@ -94,19 +100,40 @@ def print_narx(
     """
     check_is_fitted(narx)
 
+    # Use the recorded input signal names, when available, so that the printed
+    # terms show which signal (and delay) the model uses. Models fitted without
+    # recorded names fall back to the column indices.
+    names = _get_recorded_names(narx)
+    if names is not None and len(names) != narx.n_features_in_:
+        names = None
+
+    def _get_feature_str(feat_id, delay_id):
+        if names is None:
+            if delay_id == 0:
+                return f"X[k,{feat_id}]"
+            return f"X[k-{delay_id},{feat_id}]"
+        if delay_id == 0:
+            return f"{names[feat_id]}[k]"
+        return f"{names[feat_id]}[k-{delay_id}]"
+
     def _get_term_str(term_feat_ids, term_delay_ids):
         term_str = ""
         for _, (feat_id, delay_id) in enumerate(zip(term_feat_ids, term_delay_ids)):
             if -1 < feat_id < narx.n_features_in_:
-                if delay_id == 0:
-                    term_str += f"*X[k,{feat_id}]"
-                else:
-                    term_str += f"*X[k-{delay_id},{feat_id}]"
+                term_str += f"*{_get_feature_str(feat_id, delay_id)}"
             elif feat_id >= narx.n_features_in_:
                 term_str += f"*y_hat[k-{delay_id},{feat_id - narx.n_features_in_}]"
         return term_str[1:]
 
     yid_space = 5
+    terms = [
+        (narx.output_ids_[i], _get_term_str(*term_id), narx.coef_[i])
+        for i, term_id in enumerate(zip(narx.feat_ids_, narx.delay_ids_))
+    ]
+    if names is not None:
+        # Signal names can be longer than the default term space. Widen the
+        # Term column, if necessary, so that the table stays aligned.
+        term_space = max([term_space] + [len(term) for _, term, _ in terms])
     print(
         f"|{'yid':^{yid_space}}"
         + f"|{'Term':^{term_space}}"
@@ -119,11 +146,11 @@ def print_narx(
             + f"{'Intercept':^{term_space}}|"
             + f"{narx.intercept_[i]:^{coef_space}.{float_precision}f}|"
         )
-    for i, term_id in enumerate(zip(narx.feat_ids_, narx.delay_ids_)):
+    for output_id, term_str, coef in terms:
         print(
-            f"|{narx.output_ids_[i]:^{yid_space}}|"
-            + f"{_get_term_str(*term_id):^{term_space}}|"
-            + f"{narx.coef_[i]:^{coef_space}.{float_precision}f}|"
+            f"|{output_id:^{yid_space}}|"
+            + f"{term_str:^{term_space}}|"
+            + f"{coef:^{coef_space}.{float_precision}f}|"
         )
 
 
@@ -190,6 +217,9 @@ def make_narx(
     ----------
     X : array-like of shape (n_samples, n_features)
         Feature matrix.
+        If `X` is a dataframe whose columns are all strings, the column names
+        are recorded as `feature_names` of the returned model, so that the
+        model can later match the columns of a dataframe by name.
 
     y : array-like of shape (n_samples,) or (n_samples, n_outputs)
         Target vector or matrix.
@@ -306,6 +336,12 @@ def make_narx(
     |  0  |  X[k-2,0]*X[k,1]   |  1.528   |
     """
     xp, _, device_ = get_namespace_and_device(y)
+    if X is None:
+        feature_names = None
+    else:
+        # The feature indices of the selected model refer to the columns of X,
+        # so their names are recorded to match future data by name.
+        feature_names = _get_column_names(X)
     y = check_array(
         y,
         dtype=supported_float_dtypes(xp, device_),
@@ -449,6 +485,7 @@ def make_narx(
         feat_ids=feat_ids,
         delay_ids=delay_ids,
         output_ids=output_ids,
+        feature_names=feature_names,
         fit_intercept=fit_intercept,
     )
 

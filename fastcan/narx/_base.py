@@ -27,6 +27,11 @@ from ._feature import (
     make_poly_ids,
     make_time_shift_features,
 )
+from ._names import (
+    _align_predict_columns,
+    _get_recorded_names,
+    _resolve_fit_columns,
+)
 from ._narx_fast import (
     _compute_d2ydx2,
     _compute_d2ydx2p,
@@ -226,6 +231,19 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
         The id numbers indicate which output the polynomial term belongs to.
         It is useful in multi-output case.
 
+    feature_names : array-like of shape (`n_features_in_`,), default=None
+        The names of the input signals, i.e., the columns of `X`, in the order
+        of the feature indices used by `feat_ids` and `delay_ids`.
+        The names are stored in `feature_names_` and used to match the columns
+        of `X` by name, rather than by position, during :term:`fit` and
+        :meth:`predict`. This allows the same model to be used with data whose
+        columns are ordered differently.
+        If None, the column names of `X` are used when `X` is a dataframe whose
+        columns are all strings. Otherwise, the input signals are anonymous and
+        the columns are matched by position.
+
+        .. versionadded:: 0.7.0
+
     fit_intercept : bool, default=True
         Whether to fit the intercept. If set to False, intercept will be zeros.
 
@@ -246,6 +264,13 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
     feature_names_in_ : ndarray of shape (`n_features_in_`,)
         Names of features seen during :term:`fit`. Defined only when `X`
         has feature names that are all strings.
+
+    feature_names_ : ndarray of shape (`n_features_in_`,)
+        The names of the input signals, in the order of the feature indices.
+        Defined only when the input signals have names, i.e., when
+        `feature_names` is given or `X` is a dataframe with all-string column
+        names. When defined, the columns of `X` are matched to the input
+        signals by name in :term:`fit` and :meth:`predict`.
 
     max_delay_ : int
         The maximum time delay of the time shift variables.
@@ -298,10 +323,15 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
     # Notify type checker ty
     n_features_in_: int
 
+    # Class-level default so that models pickled by a previous version, which
+    # did not have the `feature_names` parameter, still work with `get_params`.
+    feature_names = None
+
     _parameter_constraints: dict = {
         "feat_ids": [None, "array-like"],
         "delay_ids": [None, "array-like"],
         "output_ids": [None, "array-like"],
+        "feature_names": [None, "array-like"],
         "fit_intercept": ["boolean"],
     }
 
@@ -311,11 +341,13 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
         feat_ids=None,
         delay_ids=None,
         output_ids=None,
+        feature_names=None,
         fit_intercept=True,
     ):
         self.feat_ids = feat_ids
         self.delay_ids = delay_ids
         self.output_ids = output_ids
+        self.feature_names = feature_names
         self.fit_intercept = fit_intercept
 
     @validate_params(
@@ -346,6 +378,15 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
         ----------
         X : array-like of shape (n_samples, `n_features_in_`) or None
             Training data.
+            If `X` is a dataframe whose columns are all strings, its columns are
+            matched to the input signals by name, so their order does not
+            matter. See `feature_names`.
+            Arrays are matched by position, so their columns must be in the
+            order of the input signals.
+            When the model has recorded input signal names, e.g., it is being
+            refitted after being loaded from disk, a dataframe whose columns do
+            not have string names raises an error, because its columns cannot be
+            matched by name.
 
         y : array-like of shape (n_samples,) or (n_samples, `n_outputs_`)
             Target values. Will be cast to X's dtype if necessary.
@@ -419,8 +460,22 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
                     mode = 4  # loss only
         none_inputs = False
         if X is None:  # Auto-regressive model
+            if self.feature_names is not None:
+                raise ValueError(
+                    "`feature_names` should be None when X is None, because an "
+                    "auto-regressive model has no input features."
+                )
             X = np.empty((1, 0), dtype=float, order="C")  # Skip validation
             none_inputs = True
+            feature_names = None
+        else:
+            # Match the columns of X to the input signals of the model by name,
+            # so that the feature indices do not depend on the column order.
+            X, feature_names = _resolve_fit_columns(
+                X,
+                self.feature_names,
+                _get_recorded_names(self),
+            )
         check_X_params = {
             "dtype": float,
             "order": "C",
@@ -436,6 +491,9 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
         X, y = validate_data(
             self, X, y, validate_separately=(check_X_params, check_y_params)
         )
+        # Record the input signal names only after the data has been validated,
+        # so that a failed fit does not leave a partially fitted model behind.
+        self.feature_names_ = feature_names
         if none_inputs:
             X = np.empty((len(y), 0), dtype=float, order="C")  # Create 0 feature input
         else:
@@ -1155,6 +1213,16 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
             When X is an array, it is input data.
             When (nonlinear) AR model is adopted, where `n_features_in_` is 0,
             X can be an integer, which indicates the total steps to predict.
+            If X is a dataframe whose columns are all strings, its columns are
+            matched to the input signals of the model by name, so their order
+            does not matter and extra columns are ignored. Missing columns
+            raise an error.
+            Arrays are matched by position, so their columns must be in the
+            order of the input signals of the model, i.e., the order of
+            `feature_names_`.
+            When the model has recorded input signal names, a dataframe whose
+            columns do not have string names raises an error, because its
+            columns cannot be matched by name.
 
         y_init : array-like of shape (n_init,) or (n_init, `n_outputs_`), default=None
             The initial values for the prediction of y.
@@ -1177,6 +1245,9 @@ class NARX(MultiOutputMixin, RegressorMixin, BaseEstimator):
                     f"but got an integer {X}, when `n_features_in_` is not 0."
                 )
         else:
+            # Match the columns of X to the input signals of the model by name,
+            # so that the column order of X does not matter.
+            X = _align_predict_columns(X, _get_recorded_names(self))
             X = validate_data(
                 self,
                 X,
